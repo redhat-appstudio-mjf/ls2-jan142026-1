@@ -1,0 +1,90 @@
+# Initialize Namespace Job
+# This Job runs on deployment to set up the namespace with required secrets
+# It triggers a PipelineRun that uses the local dev-namespace-setup Task
+#
+# The Task parameters can be configured via:
+# 1. Pre-existing Kubernetes secrets in the namespace
+# 2. Environment variables set by the cluster admin
+# 3. Manual configuration after deployment
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: initialize-namespace-${{ values.name }}
+  labels:
+    app.kubernetes.io/part-of: ${{ values.name }}
+    app.kubernetes.io/component: namespace-setup
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      name: initialize-namespace-${{ values.name }}
+    spec:
+      serviceAccountName: pipeline
+      restartPolicy: Never
+      containers:
+        - name: initialize-namespace
+          image: quay.io/redhat-ai-dev/utils:latest
+          env:
+            # These environment variables are read from the pipeline-secrets Secret
+            # configured in the template. Keys match env var names for consistency.
+            - name: GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.pipelineSecretName }}
+                  key: GIT_TOKEN
+                  optional: true
+            - name: GITLAB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.pipelineSecretName }}
+                  key: GITLAB_TOKEN
+                  optional: true
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.pipelineSecretName }}
+                  key: WEBHOOK_SECRET
+                  optional: true
+            - name: QUAY_DOCKERCONFIGJSON
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.pipelineSecretName }}
+                  key: QUAY_DOCKERCONFIGJSON
+                  optional: true
+            # COSIGN_PUBLIC_KEY is auto-fetched from openshift-pipelines namespace
+          command:
+            - /bin/bash
+            - -c
+            - |
+              NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+              echo "=== Initialize RHDH Namespace: $NS ==="
+              
+              # Create a PipelineRun that runs the dev-namespace-setup Task
+              # The Task is deployed in the same namespace (no cluster resolver needed)
+              cat <<PIPELINE_RUN | oc create -f -
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                generateName: dev-namespace-setup-
+                namespace: $NS
+              spec:
+                pipelineSpec:
+                  tasks:
+                    - name: configure-namespace
+                      taskRef:
+                        name: ${{ values.name }}-dev-namespace-setup
+                      params:
+                        - name: git_token
+                          value: "${GIT_TOKEN:-}"
+                        - name: gitlab_token
+                          value: "${GITLAB_TOKEN:-}"
+                        - name: webhook_secret
+                          value: "${WEBHOOK_SECRET:-}"
+                        - name: quay_dockerconfigjson
+                          value: "${QUAY_DOCKERCONFIGJSON:-}"
+              PIPELINE_RUN
+              
+              echo "=== PipelineRun created successfully ==="
